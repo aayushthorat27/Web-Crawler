@@ -93,12 +93,6 @@ class ClickableElementTester:
 
     def _divide_elements_into_batches(self, elements: List[Dict], num_batches: int = 3) -> List[List[Dict]]:
         """Divide elements into specified number of batches for concurrent processing"""
-        if not elements:
-            return []
-        
-        # Ensure num_batches is not greater than the number of elements
-        num_batches = min(num_batches, len(elements))
-        
         batch_size = len(elements) // num_batches
         remainder = len(elements) % num_batches
 
@@ -211,17 +205,15 @@ class ClickableElementTester:
             # Attempt to click the element
             try:
                 element.click()
+                click_successful = True
             except ElementClickInterceptedException:
                 try:
                     driver.execute_script("arguments[0].click();", element)
+                    click_successful = True
                 except Exception as js_error:
                     result['click_status'] = 'click_intercepted'
-                    result['error_message'] = f'Click intercepted by JS: {str(js_error)}'
+                    result['error_message'] = f'Click intercepted: {str(js_error)}'
                     return result
-            except Exception as e:
-                result['click_status'] = 'click_error'
-                result['error_message'] = f'Direct click failed: {str(e)}'
-                return result
 
             # Wait for changes
             time.sleep(2)
@@ -234,7 +226,7 @@ class ClickableElementTester:
             # Determine click status
             if self.is_dead_click_by_href(element_info):
                 result['click_status'] = 'dead_click'
-                result['error_message'] = 'Dead click: href is javascript:void(0) or #'
+                result['error_message'] = 'Dead click: href is javascript:void(0)'
             elif current_url != initial_url:
                 result['click_status'] = 'active_navigation'
                 result['page_changed'] = True
@@ -244,12 +236,13 @@ class ClickableElementTester:
             else:
                 # Check for new elements or modals
                 try:
-                    # A more robust check for UI changes
-                    new_modals_or_dropdowns = driver.execute_script("""
-                        return !!(document.querySelector('.modal, .popup, .overlay, .dialog, [role="dialog"], [role="alertdialog"]') ||
-                                  document.querySelector('.dropdown-menu, .menu-open, [aria-expanded="true"]'));
-                    """)
-                    if new_modals_or_dropdowns:
+                    modals = driver.find_elements(By.CSS_SELECTOR,
+                        '.modal, .popup, .overlay, .dialog, [role="dialog"], [role="alertdialog"]')
+
+                    dropdowns = driver.find_elements(By.CSS_SELECTOR,
+                        '.dropdown-menu, .menu-open, [aria-expanded="true"]')
+
+                    if modals or dropdowns:
                         result['click_status'] = 'active_ui_change'
                         result['new_elements_appeared'] = True
                     else:
@@ -264,44 +257,121 @@ class ClickableElementTester:
         return result
 
 
+    # def _find_element_by_info_with_driver(self, element_info: Dict, driver: webdriver.Edge) -> Optional[webdriver.remote.webelement.WebElement]:
+    #     """Find element using stored information with a specific driver"""
+    #     strategies = [
+    #         (By.ID, element_info['id']) if element_info['id'] else None,
+    #         (By.XPATH, element_info['xpath']) if element_info['xpath'] != 'xpath_unavailable' else None,
+    #         (By.CSS_SELECTOR, f".{element_info['class_names'].replace(' ', '.')}") if element_info['class_names'] else None,
+    #     ]
+
+    #     for strategy in strategies:
+    #         if strategy:
+    #             try:
+    #                 elements = driver.find_elements(*strategy)
+    #                 for element in elements:
+    #                     if (element.is_displayed() and
+    #                         element.tag_name == element_info['tag_name'] and
+    #                         element.text.strip()[:100] == element_info['text']):
+    #                         return element
+    #             except Exception:
+    #                 continue
+
+    #     return None
+
+    # def _find_element_by_info_with_driver(self, element_info: Dict, driver: webdriver.Edge) -> Optional[webdriver.remote.webelement.WebElement]:
+    #     """
+    #     Find element using stored information with a specific driver, trying multiple robust strategies.
+    #     """
+
+    #     # --- Strategy 2: Use the generated XPath (good fallback) ---
+    #     xpath = element_info.get('xpath')
+    #     if xpath and xpath != 'xpath_unavailable':
+    #         try:
+    #             element = driver.find_element(By.XPATH, xpath)
+    #             if element.is_displayed():
+    #                 return element
+    #         except Exception:
+    #             pass  # Silently fail and move to the next strategy
+
+    #     # --- Strategy 1: Use the generated CSS Selector (most reliable) ---
+    #     css_selector = element_info.get('css_selector')
+    #     if css_selector and css_selector != 'css_selector_unavailable':
+    #         try:
+    #             # Use find_elements to verify the match without raising an immediate exception
+    #             elements = driver.find_elements(By.CSS_SELECTOR, css_selector)
+    #             for element in elements:
+    #                 # Verify it's the correct element before returning
+    #                 if element.is_displayed() and element.tag_name == element_info['tag_name']:
+    #                     return element
+    #         except Exception:
+    #             pass  # Silently fail and move to the next strategy
+
+    #     # --- Strategy 3: Find by unique text content (great for links/buttons) ---
+    #     tag_name = element_info['tag_name']
+    #     text = element_info.get('text')
+    #     if text:
+    #         try:
+    #             # Create a precise XPath for an element with specific text
+    #             text_xpath = f"//{tag_name}[normalize-space()=\"{text}\"]"
+    #             elements = driver.find_elements(By.XPATH, text_xpath)
+    #             for el in elements:
+    #                 # Verify with class name as an extra check
+    #                 if el.is_displayed() and el.get_attribute('class') == element_info.get('class_names'):
+    #                     return el
+    #         except Exception:
+    #             pass
+
+    #     # If all strategies fail, return None
+    #     return None
+
     def _find_element_by_info_with_driver(self, element_info: Dict, driver: webdriver.Edge) -> Optional[webdriver.remote.webelement.WebElement]:
         """
-        Find element using stored information with a specific driver, prioritizing specific locators.
+        Finds an element using multiple strategies for robustness. This function replaces the previous, more brittle approach.
         """
-        # Prioritize the most specific locators captured during discovery
-        strategies = [
-            (By.CSS_SELECTOR, element_info.get('css_selector')),
-            (By.XPATH, element_info.get('xpath')),
-            (By.ID, element_info.get('id'))
-        ]
-
-        for by, value in strategies:
-            if value and value not in ['css_selector_unavailable', 'xpath_unavailable']:
-                try:
-                    element = driver.find_element(by, value)
-                    # A quick check to ensure it's likely the same element
-                    if element.is_displayed() and element.tag_name == element_info['tag_name']:
-                        return element
-                except NoSuchElementException:
-                    continue # Try the next strategy
-                except Exception as e:
-                    print(f"Finder warning: {e}")
-                    continue
-
-        # Fallback to a more general search if specific locators fail
+        # Strategy 1: The original XPath is the most specific. Try it first.
         try:
-            class_selector = f".{'.'.join(element_info['class_names'].split())}"
-            elements = driver.find_elements(By.CSS_SELECTOR, class_selector)
-            for element in elements:
-                if (element.is_displayed() and
-                    element.tag_name == element_info['tag_name'] and
-                    element.text.strip()[:100] == element_info['text']):
-                    return element
-        except Exception:
-            return None # Failed to find the element
+            element = driver.find_element(By.XPATH, element_info['xpath'])
+            # A quick check to ensure it's likely the same element and not hidden.
+            if element.is_displayed():
+                return element
+        except (NoSuchElementException, StaleElementReferenceException):
+            # If not found or stale, proceed to the next strategy.
+            pass
+
+        # Strategy 2: Use other attributes for a more general search.
+        # This is a fallback for when the DOM structure changes slightly.
+        try:
+            tag_name = element_info['tag_name']
+            class_names = element_info['class_names'].strip().replace(' ', '.')
+            text = element_info['text'].strip()
+
+            # Try to find by a combination of tag, class, and text.
+            if class_names:
+                css_selector = f"{tag_name}.{class_names}"
+                elements = driver.find_elements(By.CSS_SELECTOR, css_selector)
+                
+                # If we get multiple results, filter by text to find the exact one.
+                if len(elements) > 1 and text:
+                    for el in elements:
+                        if el.text.strip() == text:
+                            return el
+                elif len(elements) == 1:
+                    return elements[0]
+
+            # Strategy 3: Find by text content if other methods fail.
+            # This is useful for links or buttons where the text is unique.
+            if text:
+                # Using contains() is more flexible than an exact match.
+                text_xpath = f"//{tag_name}[contains(normalize-space(), \"{text}\")]"
+                element = driver.find_element(By.XPATH, text_xpath)
+                return element
+
+        except (NoSuchElementException, StaleElementReferenceException):
+            # Element not found by any fallback strategy.
+            return None
         
         return None
-
 
     def _make_carousel_element_clickable_with_driver(self, element, driver: webdriver.Edge) -> None:
         """Make a carousel element visible and clickable using specific driver"""
@@ -366,7 +436,7 @@ class ClickableElementTester:
                 'concurrent_info': {
                     'max_workers': self.max_workers,
                     'batches_created': len(batches),
-                    'batch_sizes': [len(b) for b in batches]
+                    'batch_sizes': [len(batch) for batch in batches]
                 },
                 'summary': {},
                 'timestamp': datetime.now().isoformat()
@@ -380,7 +450,7 @@ class ClickableElementTester:
                 # Submit batch processing tasks
                 future_to_batch = {
                     executor.submit(self._test_element_batch, batch, driver_pool[i], i+1, url): i
-                    for i, batch in enumerate(batches) if batch
+                    for i, batch in enumerate(batches)
                 }
 
                 # Collect results as they complete
@@ -423,7 +493,7 @@ class ClickableElementTester:
         except Exception as e:
             print(f"Error during concurrent comprehensive test: {e}")
             # Cleanup on error
-            if 'driver_pool' in locals() and driver_pool:
+            if 'driver_pool' in locals():
                 self._close_driver_pool(driver_pool)
             return {'error': str(e)}
 
@@ -681,7 +751,7 @@ class ClickableElementTester:
                 'data_testid': element.get_attribute('data-testid') or '',
                 'aria_label': element.get_attribute('aria-label') or '',
                 'xpath': self._get_element_xpath(element),
-                'location': element.location,
+                # 'location': element.location,
                 'size': element.size,
                 'is_displayed': True,
                 'is_enabled': element.is_enabled(),
@@ -713,59 +783,29 @@ class ClickableElementTester:
                 existing['text'] == element_info['text'])):
                 return True
         return False
-
+    
     def _scroll_to_bottom(self) -> None:
         """Scroll to the bottom of the page to trigger lazy-loaded elements."""
         print("📜 Scrolling to the bottom of the page to load all content...")
         last_height = self.driver.execute_script("return document.body.scrollHeight")
-
+        
         while True:
             # Scroll down to the bottom
             self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-
+            
             # Wait to load the page. Increased wait time for network-dependent lazy loading.
             time.sleep(3)
-
+            
             # Calculate new scroll height and compare with last scroll height
             new_height = self.driver.execute_script("return document.body.scrollHeight")
             if new_height == last_height:
                 break
             last_height = new_height
-
+        
         print("✅ Reached the bottom of the page.")
         # Scroll back to the top to ensure a consistent starting point for element finding
         self.driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1)
-        
-    # def _filter_nested_elements(self, elements: List[webdriver.remote.webelement.WebElement]) -> List[webdriver.remote.webelement.WebElement]:
-    #     """Filter out nested clickable elements, keeping only the innermost ones."""
-    #     if not elements:
-    #         return []
-        
-    #     innermost_elements = []
-    #     # Using a more robust check than simple XPath string comparison
-    #     for i in range(len(elements)):
-    #         is_child = False
-    #         for j in range(len(elements)):
-    #             if i == j:
-    #                 continue
-    #             try:
-    #                 # Check if element[i] is a child of element[j]
-    #                 if self.driver.execute_script("return arguments[0].contains(arguments[1])", elements[j], elements[i]):
-    #                     is_child = True
-    #                     break
-    #             except StaleElementReferenceException:
-    #                 # If an element becomes stale, it's safer to discard it from this check
-    #                 is_child = True # Treat as child to be safe
-    #                 break
-    #         if not is_child:
-    #             innermost_elements.append(elements[i])
-
-    #     if len(elements) != len(innermost_elements):
-    #         print(f"✅ Filtered out {len(elements) - len(innermost_elements)} nested elements, keeping the innermost ones.")
-            
-    #     return innermost_elements
-
 
     def find_clickable_elements(self, url: str) -> List[Dict]:
         """Find all potentially clickable elements on the page"""
@@ -796,50 +836,35 @@ class ClickableElementTester:
             '.navbar', '.nav-bar', '.site-nav', '.primary-nav'
         ]
 
-        # Get all potentially clickable elements first
-        all_potential_elements = self._find_all_potential_clickables(header_footer_selectors)
+        main_content_area = self._get_main_content_area()
+        carousel_elements = self._find_carousel_elements(main_content_area, header_footer_selectors)
+        clickable_elements = self._find_regular_clickables(main_content_area, header_footer_selectors)
 
-        # Filter out nested elements, keeping only the innermost ones
-        # filtered_web_elements = self._filter_nested_elements(all_potential_elements)
+        clickable_elements.extend(carousel_elements)
+
+        # Advanced de-duplication to handle nested elements
+        print(f"\n🔬 Running advanced de-duplication on {len(clickable_elements)} elements...")
+        deduplicated_elements = self._advanced_deduplication(clickable_elements)
+        print(f"Filtered {len(clickable_elements) - len(deduplicated_elements)} nested duplicate elements.")
         
-        # Now, extract info and perform final deduplication
+        # Final deduplication pass using unique_id
         final_elements = []
-        # for element in filtered_web_elements:
-        for element in all_potential_elements:
-            element_info = self._extract_element_info(element)
-            if element_info: # This also handles seen_elements check
+        unique_ids = set()
+        for element_info in deduplicated_elements:  # Use the newly de-duplicated list
+            if element_info and element_info.get('unique_id') and element_info['unique_id'] not in unique_ids:
+                unique_ids.add(element_info['unique_id'])
                 final_elements.append(element_info)
 
-        print(f"Found {len(final_elements)} unique, innermost clickable elements.")
+        # Final deduplication pass
+        # final_elements = []
+        # unique_ids = set()
+        # for element_info in clickable_elements:
+        #     if element_info and element_info['unique_id'] not in unique_ids:
+        #         unique_ids.add(element_info['unique_id'])
+        #         final_elements.append(element_info)
+
+        print(f"Found {len(final_elements)} potentially clickable elements after deduplication.")
         return final_elements
-
-
-    def _find_all_potential_clickables(self, header_footer_selectors) -> List[webdriver.remote.webelement.WebElement]:
-        """Finds all potential clickable WebElements without info extraction yet."""
-        clickable_selectors = [
-            'a', 'button', 'input[type="button"]', 'input[type="submit"]', '[role="button"]', '[onclick]'
-        ]
-        
-        found_elements = []
-        unique_elements = set()
-
-        for selector in clickable_selectors:
-            try:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    try:
-                        if (element.is_displayed() and element.is_enabled() and
-                            not self._is_in_header_or_footer(element, header_footer_selectors)):
-                            # Use the element object itself for uniqueness check
-                            if element not in unique_elements:
-                                found_elements.append(element)
-                                unique_elements.add(element)
-                    except StaleElementReferenceException:
-                        continue
-            except Exception as e:
-                print(f"Error finding elements with selector '{selector}': {e}")
-        
-        return found_elements
 
 
     def _find_carousel_elements(self, main_content_area, header_footer_selectors) -> List[Dict]:
@@ -884,15 +909,15 @@ class ClickableElementTester:
             'a', 'button',
             'input[type="button"]', 'input[type="submit"]', 'input[type="reset"]',
             '[onclick]', '[onmousedown]', '[onmouseup]', '[ondblclick]',
+            '.btn', '.button', '.link', '.clickable', '.click', '.calculator-button',
             '[role="button"]', '[role="link"]', '[role="tab"]', '[role="menuitem"]',
-            '[role="option"]', '[role="treeitem"]', '[role="gridcell"]',
+            '[role="option"]', '[role="treeitem"]', '[role="gridcell"]', '[role="group"]',
             '[tabindex="0"]', '[tabindex="-1"]', 'div[tabindex]', 'span[tabindex]',
             'li[tabindex]', 'td[tabindex]', 'th[tabindex]',
-            '.btn', '.button', '.link', '.clickable', '.click',
             '.cta', '.call-to-action', '.action', '.trigger',
-            '.menu-item', '.nav-item', '.tab', '.accordion',
+            '.menu-item', '.nav-item', '.tab', '.accordion__toggle', '.tooltip-xaop--icon',
             '.dropdown', '.select', '.picker', '.toggle',
-            '.card', '.tile', '.item', '.option',
+            '.card', '.tile', '.item', '.option', '.variant-tabs__variant-list__item',
             '.close', '.cancel', '.submit', '.save', '.edit', '.delete',
             '.expand', '.collapse', '.show', '.hide',
             '.play', '.pause', '.stop', '.next', '.prev', '.previous',
@@ -911,7 +936,6 @@ class ClickableElementTester:
             'li[onclick]', 'td[onclick]', 'tr[onclick]',
             'li[role="button"]', 'td[role="button"]', 'tr[role="button"]',
             'svg[onclick]', 'svg[role="button"]',
-            'area', 'img[onclick]', 'img[role="button"]',
             'div[role="button"]', 'span[role="button"]',
             'p[role="button"]', 'section[role="button"]',
             '.thumbnail__overlay'
@@ -929,7 +953,8 @@ class ClickableElementTester:
                     try:
                         if (element.is_displayed() and element.is_enabled() and
                             not self._is_in_header_or_footer(element, header_footer_selectors) and
-                            not self._is_carousel_element(element)):
+                            not self._is_carousel_element(element) and
+                            not self._is_in_reviews_carousel(element)):
 
                             element_info = self._extract_element_info(element)
                             if element_info:
@@ -962,6 +987,7 @@ class ClickableElementTester:
             for element in pointer_elements:
                 try:
                     if (element.is_displayed() and element.is_enabled() and
+                        element.tag_name.lower() != 'img' and
                         not self._is_in_header_or_footer(element, header_footer_selectors) and
                         not self._is_carousel_element(element)):
 
@@ -976,6 +1002,59 @@ class ClickableElementTester:
             print(f"Error finding pointer cursor elements: {e}")
 
         return elements
+
+    def _advanced_deduplication(self, elements: List[Dict]) -> List[Dict]:
+        """
+        De-duplicates elements. It removes children that are nested inside other clickable
+        elements like tabs or cards to avoid redundant testing.
+        """
+        elements_to_discard = set()
+        # Sort by XPath length (shorter to longer) to ensure parents are processed first.
+        # This makes the nesting check more efficient.
+        sorted_elements = sorted(elements, key=lambda x: len(x.get('xpath', '')))
+
+        for i in range(len(sorted_elements)):
+            for j in range(i + 1, len(sorted_elements)):
+                parent_candidate = sorted_elements[i]
+                child_candidate = sorted_elements[j]
+
+                parent_id = parent_candidate.get('unique_id')
+                child_id = child_candidate.get('unique_id')
+
+                # Skip if already marked for discard
+                if parent_id in elements_to_discard or child_id in elements_to_discard:
+                    continue
+
+                parent_xpath = parent_candidate.get('xpath', '')
+                child_xpath = child_candidate.get('xpath', '')
+
+                if not parent_xpath or not child_xpath:
+                    continue
+                
+                # If a parent is a special container, discard all children within it.
+                parent_classes = parent_candidate.get('class_names', '')
+                is_special_container = 'variant-tabs__variant-list__item' in parent_classes
+
+                if is_special_container and child_xpath.startswith(parent_xpath) and child_xpath != parent_xpath:
+                    elements_to_discard.add(child_id)
+                    continue
+
+                # General case: check if one is a direct child of the other and shares text/class
+                if child_xpath.startswith(parent_xpath) and child_xpath.count('/') == parent_xpath.count('/') + 1:
+                    
+                    has_same_text = (parent_candidate.get('text') and 
+                                     parent_candidate.get('text') == child_candidate.get('text'))
+                    
+                    has_same_class = (parent_candidate.get('class_names') and
+                                      parent_candidate.get('class_names') == child_candidate.get('class_names'))
+
+                    if has_same_text or has_same_class:
+                        # Mark the child element for removal
+                        elements_to_discard.add(child_id)
+
+        # Create the final list, excluding the discarded elements
+        final_list = [elem for elem in elements if elem.get('unique_id') not in elements_to_discard]
+        return final_list
 
     def _find_elements_by_event_listeners(self, header_footer_selectors) -> List[Dict]:
         """Find elements with click event listeners"""
@@ -997,7 +1076,8 @@ class ClickableElementTester:
                 try:
                     if (element.is_displayed() and element.is_enabled() and
                         not self._is_in_header_or_footer(element, header_footer_selectors) and
-                        not self._is_carousel_element(element)):
+                        not self._is_carousel_element(element) and
+                        not self._is_in_reviews_carousel(element)):
 
                         element_info = self._extract_element_info(element)
                         if element_info:
@@ -1022,7 +1102,8 @@ class ClickableElementTester:
             '.main-content',
             '.content',
             '.page-content',
-            '.site-content'
+            '.site-content',
+            '.xaop-main-content',
         ]
 
         for selector in main_content_selectors:
@@ -1100,6 +1181,19 @@ class ClickableElementTester:
             print(f"Error checking if element is in header/footer: {e}")
             return False
 
+    def _is_in_reviews_carousel(self, element) -> bool:
+        """Check if an element is within the 'reviews-carousel-banner' div."""
+        try:
+            # Use closest() to find the nearest ancestor with the specified class
+            return self.driver.execute_script(
+                "return arguments[0].closest('.reviews-carousel-banner') !== null;",
+                element
+            )
+        except Exception as e:
+            print(f"Error checking if element is in reviews carousel: {e}")
+            # On error, assume it's not in the excluded div to avoid false negatives
+            return False
+
     def _is_carousel_element(self, element) -> bool:
         """Check if element is part of a carousel that we've already processed"""
         try:
@@ -1141,25 +1235,21 @@ class ClickableElementTester:
     def _extract_element_info(self, element) -> Optional[Dict]:
         """Extract and deduplicate element info based on unique content signature."""
         try:
-            if not isinstance(element, webdriver.remote.webelement.WebElement):
-                return None
-                
             # Extract key info
             tag_name = element.tag_name
             text = element.text.strip()[:100] if element.text else ''
             class_names = element.get_attribute('class') or ''
             href = element.get_attribute('href') or ''
-            onclick = element.get_attribute('onclick') or ''
             element_id = element.get_attribute('id') or ''
 
             # Create deduplication key
-            dedup_key = f"{tag_name}|{text}|{href}|{class_names}|{element_id}"
-            unique_id = hashlib.md5(dedup_key.encode()).hexdigest()
+            # dedup_key = f"{tag_name}|{text}|{href}|{class_names}|{element_id}"
+            # unique_id = hashlib.md5(dedup_key.encode()).hexdigest()
 
             # Deduplication
-            if unique_id in self.seen_elements:
-                return None
-            self.seen_elements.add(unique_id)
+            # if unique_id in self.seen_elements:
+            #     return None
+            # self.seen_elements.add(unique_id)
 
             # Final full element info
             element_info = {
@@ -1167,31 +1257,22 @@ class ClickableElementTester:
                 'text': text,
                 'class_names': class_names,
                 'id': element_id,
-                'href': href,
-                'onclick': onclick,
                 'status_code': self.get_status_code(href),
                 'role': element.get_attribute('role') or '',
-                'type': element.get_attribute('type') or '',
-                'data_testid': element.get_attribute('data-testid') or '',
                 'aria_label': element.get_attribute('aria-label') or '',
-                'title': element.get_attribute('title') or '',
-                'name': element.get_attribute('name') or '',
-                'value': element.get_attribute('value') or '',
-                'src': element.get_attribute('src') or '',
                 'alt': element.get_attribute('alt') or '',
                 'xpath': self._get_element_xpath(element),
                 'css_selector': self._get_element_css_selector(element),
-                'location': element.location,
-                'size': element.size,
                 'is_displayed': element.is_displayed(),
                 'is_enabled': element.is_enabled(),
-                'unique_id': unique_id
             }
-
+            element_info['unique_id'] = self._create_unique_id(element_info)
+            if element_info['unique_id'] in self.seen_elements:
+                return None
+            self.seen_elements.add(element_info['unique_id'])
+            
             return element_info
 
-        except StaleElementReferenceException:
-            return None # Element is no longer attached to the DOM
         except Exception as e:
             print(f"Error extracting element info: {e}")
             return None
@@ -1201,7 +1282,7 @@ class ClickableElementTester:
         try:
             return self.driver.execute_script("""
                 function getXPath(element) {
-                    if (element.id !== '') return 'id(\"' + element.id + '\")';
+                    if (element.id !== '') return '//*[@id=\"' + element.id + '\"]';
                     if (element === document.body) return '/html/body';
                     var ix = 0;
                     var siblings = element.parentNode.childNodes;
@@ -1222,27 +1303,27 @@ class ClickableElementTester:
             return self.driver.execute_script("""
                 function getCssSelector(el) {
                     if (!(el instanceof Element)) return '';
-                    let path = [];
+                    var path = [];
                     while (el.nodeType === Node.ELEMENT_NODE) {
-                        let selector = el.nodeName.toLowerCase();
+                        var selector = el.nodeName.toLowerCase();
                         if (el.id) {
-                            selector += '#' + el.id.replace(/(:|\\.| )/g, '\\\\$1');
+                            selector += '#' + el.id;
                             path.unshift(selector);
                             break;
                         } else {
-                            let sib = el, nth = 1;
+                            var sib = el, nth = 1;
                             while (sib = sib.previousElementSibling) {
                                 if (sib.nodeName.toLowerCase() == selector)
                                     nth++;
                             }
                             if (nth != 1)
-                                selector += ":nth-of-type("+nth+")";
+                                selector += ":nth-of-type(" + nth + ")";
                         }
                         path.unshift(selector);
                         el = el.parentNode;
                     }
                     return path.join(" > ");
-                 }
+                }
                 return getCssSelector(arguments[0]);
             """, element)
         except Exception:
@@ -1255,14 +1336,14 @@ class ClickableElementTester:
             element_info['id'],
             element_info['class_names'],
             element_info['text'][:50],
-            str(element_info['location']),
+            # str(element_info['location']),
         ]
         return hash('|'.join(str(c) for c in components))
 
     def is_dead_click_by_href(self, element_info: Dict) -> bool:
         """Returns True if the element is a dead click based on href."""
-        href = (element_info.get('href') or '').strip().lower()
-        return href in ['javascript:void(0)', 'javascript:;', '#', '']
+        href = (element_info.get('href') or '').replace(' ', '').lower()
+        return href in ['javascript:void(0)', 'javascript::void(0)', '#', ' ']
 
     def test_element_click(self, element_info: Dict) -> Dict:
         """Test if an element click is functional or dead - with carousel support"""
@@ -1310,9 +1391,11 @@ class ClickableElementTester:
             # Attempt to click the element
             try:
                 element.click()
+                click_successful = True
             except ElementClickInterceptedException:
                 try:
                     self.driver.execute_script("arguments[0].click();", element)
+                    click_successful = True
                 except Exception as js_error:
                     result['click_status'] = 'click_intercepted'
                     result['error_message'] = f'Click intercepted: {str(js_error)}'
@@ -1370,7 +1453,7 @@ class ClickableElementTester:
         try:
             carousel_containers = self.driver.find_elements(By.CSS_SELECTOR,
                 '.carousel, .slider, .banner-slider, .swiper, .slick, [data-ride="carousel"], ' +
-                '.owl-carousel, .swiper-container, .glide, .splide, .flickity, ' +
+                '.owl-carousel, .swiper-container, .glide, .splide, .flickity, ' + 
                 '[class*="carousel"], [class*="slider"], [class*="swiper"]'
             )
 
@@ -1515,26 +1598,24 @@ class ClickableElementTester:
     def _generate_summary(self, test_results: Dict) -> Dict:
         """Generate test summary statistics"""
         total = test_results['elements_tested']
-        if total == 0: return {}
         return {
             'total_tested': total,
-            'active_percentage': round((test_results['active_clicks'] / total) * 100, 2),
-            'dead_percentage': round((test_results['dead_clicks'] / total) * 100, 2),
-            'error_percentage': round((test_results['errors'] / total) * 100, 2),
-            'most_common_classes_on_error': self._get_most_common_classes(test_results['results'], error_only=True),
+            'active_percentage': round((test_results['active_clicks'] / total) * 100, 2) if total > 0 else 0,
+            'dead_percentage': round((test_results['dead_clicks'] / total) * 100, 2) if total > 0 else 0,
+            'error_percentage': round((test_results['errors'] / total) * 100, 2) if total > 0 else 0,
+            'most_common_classes': self._get_most_common_classes(test_results['results']),
             'click_status_breakdown': self._get_click_status_breakdown(test_results['results'])
         }
 
-    def _get_most_common_classes(self, results: List[Dict], error_only: bool = False) -> List[tuple]:
-        """Get most common class names from tested elements, optionally only for errors."""
+    def _get_most_common_classes(self, results: List[Dict]) -> List[tuple]:
+        """Get most common class names from tested elements"""
         class_counts = {}
         for result in results:
-            if error_only and result['click_status'] in ['dead_click', 'error', 'element_not_found', 'not_clickable']:
-                classes = result['element_info']['class_names']
-                if classes:
-                    for class_name in classes.split():
-                        class_counts[class_name] = class_counts.get(class_name, 0) + 1
-        
+            classes = result['element_info']['class_names']
+            if classes:
+                for class_name in classes.split():
+                    class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
         return sorted(class_counts.items(), key=lambda x: x[1], reverse=True)[:10]
 
     def _get_click_status_breakdown(self, results: List[Dict]) -> Dict:
@@ -1556,42 +1637,38 @@ class ClickableElementTester:
             print(f"An error occurred: {test_results['error']}")
             return
             
-        summary = test_results.get('summary', {})
         print(f"\n📊 SUMMARY STATISTICS:")
-        print(f"   Total Elements Found: {test_results.get('total_elements_found', 'N/A')}")
-        print(f"   Elements Tested: {test_results.get('elements_tested', 'N/A')}")
-        print(f"   Active Clicks: {test_results.get('active_clicks', 'N/A')} ({summary.get('active_percentage', 0)}%)")
-        print(f"   Dead Clicks: {test_results.get('dead_clicks', 'N/A')} ({summary.get('dead_percentage', 0)}%)")
-        print(f"   Errors (incl. not found): {test_results.get('errors', 'N/A')} ({summary.get('error_percentage', 0)}%)")
+        print(f"   Total Elements Found: {test_results['total_elements_found']}")
+        print(f"   Elements Tested: {test_results['elements_tested']}")
+        print(f"   Active Clicks: {test_results['active_clicks']} ({test_results.get('summary', {}).get('active_percentage', 0)}%)")
+        print(f"   Dead Clicks: {test_results['dead_clicks']} ({test_results.get('summary', {}).get('dead_percentage', 0)}%)")
+        print(f"   Errors: {test_results['errors']} ({test_results.get('summary', {}).get('error_percentage', 0)}%)")
 
-        print(f"\n🏷️  MOST COMMON CLASSES ON FAILED ELEMENTS:")
-        for class_name, count in summary.get('most_common_classes_on_error', [])[:5]:
+        print(f"\n🏷️  MOST COMMON CLASSES:")
+        for class_name, count in test_results.get('summary', {}).get('most_common_classes', [])[:5]:
             print(f"   {class_name}: {count}")
 
         print(f"\n📈 CLICK STATUS BREAKDOWN:")
-        for status, count in summary.get('click_status_breakdown', {}).items():
+        for status, count in test_results.get('summary', {}).get('click_status_breakdown', {}).items():
             print(f"   {status}: {count}")
 
-        print(f"\n🔍 DETAILED ERROR RESULTS (showing first 10):")
-        error_results = [r for r in test_results.get('results', []) if not r['click_status'].startswith('active')]
-        for i, result in enumerate(error_results[:10], 1):
+        print(f"\n🔍 DETAILED RESULTS (showing first 10):")
+        for i, result in enumerate(test_results.get('results', [])[:10], 1):
             element = result['element_info']
-            print(f"\n   [{i}] {element['tag_name'].upper()} - {element['text'][:50]}")
+            print(f"\n   [{i}] {element['tag_name'].upper()}")
             print(f"       Class: {element['class_names'][:80]}")
-            print(f"       XPath: {element['xpath']}")
+            print(f"       Text: {element['text'][:80]}")
             print(f"       Status: {result['click_status']}")
             if result['error_message']:
-                print(f"       Error Details: {result['error_message']}")
+                print(f"       Error: {result['error_message']}")
 
     def save_results_to_file(self, test_results: Dict, filename: str = None) -> None:
         """Save test results to JSON file"""
         if not self.url:
             self.url = "unknown_url"
         if not filename:
-            safe_url = self.url.replace('https://', '').replace('http://', '').replace('/', '_').replace('?', '_')
-            # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # filename = f"click_test_{safe_url}_{timestamp}.json"
-            filename = f"click_test_{safe_url}.json"
+            safe_url = self.url.replace('https://', '').replace('http://', '').replace('/', '_')
+            filename = f"clickability_test_{safe_url}_4.json"
 
         try:
             with open(filename, 'w', encoding='utf-8') as f:
@@ -1607,14 +1684,14 @@ def main():
 
     try:
         # Initialize with 3 concurrent workers in headless mode
-        tester = ClickableElementTester(headless=True, timeout=20, max_workers=3)
+        tester = ClickableElementTester(headless=True, timeout=15, max_workers=3)
 
         # Run concurrent test
         results = tester.run_comprehensive_test_concurrent(test_url)
 
         # Print and save results
-        if results and 'error' not in results:
-            # tester.print_detailed_report(results)
+        if results:
+            tester.print_detailed_report(results)
             tester.save_results_to_file(results)
 
     except KeyboardInterrupt:
